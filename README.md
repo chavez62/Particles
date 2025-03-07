@@ -65,3 +65,5 @@ All visualizations are optimized for performance with techniques like:
 ## License
 
 MIT
+
+![particles](https://github.com/user-attachments/assets/15697a6d-6df9-4a1d-90c4-e6cc8db303e9)
