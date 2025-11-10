@@ -1,56 +1,81 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useMemo, useCallback } from 'react';
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import type { QualitySettings } from '../hooks/usePerformanceMonitor';
+import useThreeSetup from '../hooks/useThreeSetup';
 
-const SimpleSparkles: React.FC = () => {
-  const mountRef = useRef<HTMLDivElement>(null);
-  const sceneRef = useRef<THREE.Scene | null>(null);
-  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
-  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+interface ParticleSettings {
+  particleCount: number;
+  particleSize: number;
+  speed: number;
+  glowIntensity: number;
+  rotationSpeed: number;
+}
+
+interface SimpleSparklesProps {
+  quality?: QualitySettings;
+  onFrameRecord?: (duration?: number) => void;
+  particleSettings?: ParticleSettings;
+}
+
+const SimpleSparkles: React.FC<SimpleSparklesProps> = ({ quality, onFrameRecord, particleSettings }) => {
+  const { mountRef, sceneRef, rendererRef, controlsRef, requestRef } = useThreeSetup();
   const particlesRef = useRef<THREE.Points | null>(null);
-  const controlsRef = useRef<OrbitControls | null>(null);
-  const frameIdRef = useRef<number | null>(null);
   const mouseRef = useRef<THREE.Vector2>(new THREE.Vector2(0, 0));
   
+  // Use refs for dynamic settings that shouldn't cause scene rebuild
+  const speedRef = useRef(particleSettings?.speed ?? 1);
+  const rotationSpeedRef = useRef(particleSettings?.rotationSpeed ?? 1);
+  
+  // Update refs when settings change
+  useEffect(() => {
+    speedRef.current = particleSettings?.speed ?? 1;
+    rotationSpeedRef.current = particleSettings?.rotationSpeed ?? 1;
+  }, [particleSettings?.speed, particleSettings?.rotationSpeed]);
+  
   // Handle mouse move
-  const handleMouseMove = (event: MouseEvent) => {
+  const handleMouseMove = useCallback((event: MouseEvent) => {
     mouseRef.current.x = (event.clientX / window.innerWidth) * 2 - 1;
     mouseRef.current.y = -(event.clientY / window.innerHeight) * 2 + 1;
-  };
+  }, []);
+
+  const resolvedParticleCount = useMemo(() => {
+    if (particleSettings?.particleCount) {
+      return Math.floor(particleSettings.particleCount);
+    }
+    return Math.max(500, Math.floor(quality?.particleCount ?? 3000));
+  }, [quality?.particleCount, particleSettings?.particleCount]);
+
+  const particleSize = useMemo(() => {
+    if (particleSettings?.particleSize) {
+      return particleSettings.particleSize * 0.05; // Scale to appropriate size
+    }
+    if (!quality) return 0.1;
+    switch (quality.effectsLevel) {
+      case 0:
+        return 0.08;
+      case 2:
+        return 0.12;
+      default:
+        return 0.1;
+    }
+  }, [quality, particleSettings?.particleSize]);
   
   // Setup scene
   useEffect(() => {
-    console.log('SimpleSparkles: Setting up scene');
-    
-    if (!mountRef.current) {
-      console.error('SimpleSparkles: Mount ref is not available');
+    if (!sceneRef.current || !rendererRef.current || !controlsRef.current) {
       return;
     }
     
-    // Setup scene
-    const scene = new THREE.Scene();
-    sceneRef.current = scene;
+    const scene = sceneRef.current;
+    const renderer = rendererRef.current;
+    const controls = controlsRef.current;
+    const camera = controls.object as THREE.PerspectiveCamera;
     
-    // Setup camera
-    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    // Set camera position
     camera.position.z = 15;
-    cameraRef.current = camera;
-    
-    // Setup renderer
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setPixelRatio(window.devicePixelRatio);
-    mountRef.current.appendChild(renderer.domElement);
-    rendererRef.current = renderer;
-    
-    // Create controls
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.05;
-    controlsRef.current = controls;
     
     // Create particles
-    const particleCount = 3000;
+    const particleCount = resolvedParticleCount;
     const particleGeometry = new THREE.BufferGeometry();
     const positions = new Float32Array(particleCount * 3);
     const colors = new Float32Array(particleCount * 3);
@@ -79,12 +104,13 @@ const SimpleSparkles: React.FC = () => {
     particleGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     particleGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     
-    // Create material
+    // Create material with glow intensity
+    const glowIntensity = particleSettings?.glowIntensity ?? 1;
     const particleMaterial = new THREE.PointsMaterial({
-      size: 0.1,
+      size: particleSize,
       vertexColors: true,
       transparent: true,
-      opacity: 0.8,
+      opacity: Math.min(0.8 * glowIntensity, 1),
       blending: THREE.AdditiveBlending,
       sizeAttenuation: true
     });
@@ -103,18 +129,11 @@ const SimpleSparkles: React.FC = () => {
     
     // Animation loop
     const animate = () => {
-      if (
-        controlsRef.current && 
-        rendererRef.current && 
-        sceneRef.current && 
-        cameraRef.current &&
-        particlesRef.current
-      ) {
-        // Update controls
-        controlsRef.current.update();
-        
-        // Rotate particles
-        particlesRef.current.rotation.y += 0.002;
+      const frameStart = performance.now();
+      
+      if (particlesRef.current) {
+        // Rotate particles using ref value (no scene rebuild needed)
+        particlesRef.current.rotation.y += 0.002 * rotationSpeedRef.current;
         
         // If mouse is in scene, interact with particles
         if (mouseRef.current.x !== 0 || mouseRef.current.y !== 0) {
@@ -132,10 +151,10 @@ const SimpleSparkles: React.FC = () => {
             const dy = y - (mouseRef.current.y * 10);
             const dist = Math.sqrt(dx * dx + dy * dy);
             
-            // Apply small repulsion effect
+            // Apply small repulsion effect (scaled by animation speed from ref)
             if (dist < 3) {
               const angle = Math.atan2(dy, dx);
-              const force = 0.05 * (1 - dist / 3);
+              const force = 0.05 * (1 - dist / 3) * speedRef.current;
               array[i] += Math.cos(angle) * force;
               array[i + 1] += Math.sin(angle) * force;
             }
@@ -143,37 +162,29 @@ const SimpleSparkles: React.FC = () => {
           
           positions.needsUpdate = true;
         }
-        
-        // Render
-        rendererRef.current.render(sceneRef.current, cameraRef.current);
       }
       
-      frameIdRef.current = requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+      
+      if (onFrameRecord) {
+        const frameDuration = performance.now() - frameStart;
+        onFrameRecord(frameDuration);
+      }
+      
+      requestRef.current = requestAnimationFrame(animate);
     };
     
     // Start animation
-    animate();
-    
-    // Handle window resize
-    const handleResize = () => {
-      if (cameraRef.current && rendererRef.current) {
-        cameraRef.current.aspect = window.innerWidth / window.innerHeight;
-        cameraRef.current.updateProjectionMatrix();
-        rendererRef.current.setSize(window.innerWidth, window.innerHeight);
-      }
-    };
-    
-    window.addEventListener('resize', handleResize);
+    requestRef.current = requestAnimationFrame(animate);
     
     // Cleanup function
     return () => {
-      console.log('SimpleSparkles: Cleaning up');
-      
       window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('resize', handleResize);
       
-      if (frameIdRef.current) {
-        cancelAnimationFrame(frameIdRef.current);
+      if (requestRef.current) {
+        cancelAnimationFrame(requestRef.current);
+        requestRef.current = undefined;
       }
       
       if (particlesRef.current) {
@@ -189,28 +200,11 @@ const SimpleSparkles: React.FC = () => {
           const material = particlesRef.current.material as THREE.Material;
           material.dispose();
         }
+        
+        particlesRef.current = null;
       }
-      
-      if (rendererRef.current) {
-        if (mountRef.current) {
-          mountRef.current.removeChild(rendererRef.current.domElement);
-        }
-        rendererRef.current.dispose();
-      }
-      
-      if (controlsRef.current) {
-        controlsRef.current.dispose();
-      }
-      
-      // Clear refs
-      sceneRef.current = null;
-      cameraRef.current = null;
-      rendererRef.current = null;
-      particlesRef.current = null;
-      controlsRef.current = null;
-      frameIdRef.current = null;
     };
-  }, []);
+  }, [handleMouseMove, onFrameRecord, particleSize, quality?.renderScale, resolvedParticleCount, sceneRef, rendererRef, controlsRef, requestRef, particleSettings?.particleCount, particleSettings?.particleSize, particleSettings?.glowIntensity]);
   
   return (
     <div 

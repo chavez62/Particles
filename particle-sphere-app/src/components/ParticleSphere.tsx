@@ -1,6 +1,21 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
 import useThreeSetup from "../hooks/useThreeSetup";
+import type { QualitySettings } from "../hooks/usePerformanceMonitor";
+
+interface ParticleSettings {
+  particleCount: number;
+  particleSize: number;
+  speed: number;
+  glowIntensity: number;
+  rotationSpeed: number;
+}
+
+interface ParticleSphereProps {
+  quality?: QualitySettings;
+  onFrameRecord?: (duration?: number) => void;
+  particleSettings?: ParticleSettings;
+}
 
 // Vertex shader - handles the wave animation
 const vertexShader = `
@@ -42,7 +57,7 @@ const vertexShader = `
     // Set the vertex position
     gl_Position = projectionMatrix * modelViewMatrix * vec4(newPosition, 1.0);
     
-    // Point size attenuation
+    // Point size attenuation (can be modified by settings)
     gl_PointSize = 2.0;
   }
 `;
@@ -66,13 +81,26 @@ const fragmentShader = `
   }
 `;
 
-const ParticleSphere = ({ onFrameRecord, quality }) => {
+const ParticleSphere: React.FC<ParticleSphereProps> = ({ onFrameRecord, quality, particleSettings }) => {
   const { mountRef, sceneRef, rendererRef, controlsRef, requestRef } = useThreeSetup();
   
-  // Use quality settings for particle count if available
+  // Use refs for dynamic settings that shouldn't cause scene rebuild
+  const speedRef = useRef(particleSettings?.speed ?? 1);
+  const rotationSpeedRef = useRef(particleSettings?.rotationSpeed ?? 1);
+  
+  // Update refs when settings change
+  useEffect(() => {
+    speedRef.current = particleSettings?.speed ?? 1;
+    rotationSpeedRef.current = particleSettings?.rotationSpeed ?? 1;
+  }, [particleSettings?.speed, particleSettings?.rotationSpeed]);
+  
+  // Use particle settings or quality settings for particle count
   const particleCount = useMemo(() => {
+    if (particleSettings?.particleCount) {
+      return Math.floor(particleSettings.particleCount);
+    }
     return quality?.particleCount || 3000;
-  }, [quality]);
+  }, [quality, particleSettings?.particleCount]);
   
   useEffect(() => {
     if (!sceneRef.current || !rendererRef.current || !controlsRef.current) return;
@@ -141,11 +169,11 @@ const ParticleSphere = ({ onFrameRecord, quality }) => {
       
       const startTime = window.performance.now();
       
-      // Update uniforms for shader
-      shaderMaterial.uniforms.uTime.value = clock.getElapsedTime();
+      // Update uniforms for shader (with speed multiplier from ref)
+      shaderMaterial.uniforms.uTime.value = clock.getElapsedTime() * speedRef.current;
       
       // Rotate the whole system (much more efficient than updating each particle)
-      particles.rotation.y += 0.002;
+      particles.rotation.y += 0.002 * rotationSpeedRef.current;
       
       controls.update();
       

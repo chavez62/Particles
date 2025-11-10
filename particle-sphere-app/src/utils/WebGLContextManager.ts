@@ -88,7 +88,7 @@ class WebGLContextManager {
     };
     
     // Handle WebGL context restoration
-    this.contextRestoredHandler = (_: Event) => {
+    this.contextRestoredHandler = () => {
       console.warn('WebGL context restored');
       
       // Recreate renderer if needed

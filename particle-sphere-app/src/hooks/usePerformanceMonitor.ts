@@ -1,5 +1,15 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 
+const clamp = (value: number, min: number, max: number) => {
+  return Math.min(max, Math.max(min, value));
+};
+
+type PerformanceWithMemory = Performance & {
+  memory?: {
+    usedJSHeapSize: number;
+  };
+};
+
 interface PerformanceMetrics {
   fps: number;
   frameTime: number;
@@ -9,7 +19,7 @@ interface PerformanceMetrics {
   qualityLevel: number;
 }
 
-interface QualitySettings {
+export interface QualitySettings {
   particleCount: number;
   effectsLevel: number;
   renderScale: number;
@@ -53,7 +63,7 @@ const getGPUTier = (): Promise<number> => {
       if (isHighEnd) resolve(3); // High-end GPU
       else if (isMidRange) resolve(2); // Mid-range GPU
       else resolve(1); // Low-end GPU
-    } catch (e) {
+    } catch {
       resolve(1); // Default to low tier on error
     }
   });
@@ -76,8 +86,8 @@ const usePerformanceMonitor = (options: PerformanceMonitorOptions) => {
     renderScale: 1
   });
   
-  // Performance metrics
-  const [metrics, setMetrics] = useState<PerformanceMetrics>({
+  // Performance metrics stored in a ref to avoid re-rendering the parent component
+  const metricsRef = useRef<PerformanceMetrics>({
     fps: 0,
     frameTime: 0,
     particleCount: initialParticleCount,
@@ -86,6 +96,9 @@ const usePerformanceMonitor = (options: PerformanceMonitorOptions) => {
     qualityLevel: 2 // Medium by default
   });
   
+  // Track last initial particle count to keep relative adjustments when changing visuals
+  const initialBaseRef = useRef(initialParticleCount);
+
   // Performance monitoring state with proper cleanup
   const frameCountRef = useRef(0);
   const lastTimeRef = useRef(performance.now());
@@ -96,12 +109,15 @@ const usePerformanceMonitor = (options: PerformanceMonitorOptions) => {
   const stabilityCounterRef = useRef(0);
   const isComponentMountedRef = useRef(true);
   
-  // Initialize GPU detection
+  // Initialize mounted state and GPU detection
   useEffect(() => {
+    // Ensure component is marked as mounted
+    isComponentMountedRef.current = true;
+    
     getGPUTier().then(tier => {
       if (!isComponentMountedRef.current) return;
       
-      setMetrics(prev => ({ ...prev, gpuTier: tier }));
+      metricsRef.current.gpuTier = tier;
       
       // Initial quality preset based on GPU tier
       if (tier === 3) {
@@ -125,6 +141,30 @@ const usePerformanceMonitor = (options: PerformanceMonitorOptions) => {
       isComponentMountedRef.current = false;
     };
   }, [initialParticleCount, maxParticleCount, minParticleCount]);
+
+  // When the base particle count changes (e.g., switching visualizations), align quality state
+  useEffect(() => {
+    if (!isComponentMountedRef.current) return;
+
+    setQuality(prev => {
+      const previousBase = initialBaseRef.current ?? initialParticleCount;
+      const ratio = previousBase > 0 ? prev.particleCount / previousBase : 1;
+      const nextParticleCount = clamp(
+        Math.round(initialParticleCount * ratio),
+        minParticleCount,
+        maxParticleCount
+      );
+
+      initialBaseRef.current = initialParticleCount;
+
+      metricsRef.current.particleCount = nextParticleCount;
+
+      return {
+        ...prev,
+        particleCount: nextParticleCount
+      };
+    });
+  }, [initialParticleCount, minParticleCount, maxParticleCount]);
   
   // Update metrics periodically with better performance
   useEffect(() => {
@@ -134,8 +174,10 @@ const usePerformanceMonitor = (options: PerformanceMonitorOptions) => {
       const currentTime = performance.now();
       const deltaTime = currentTime - lastTimeRef.current;
       
-      // Calculate FPS
-      const fps = Math.round((frameCountRef.current * 1000) / deltaTime);
+      // Calculate FPS - ensure we have a valid deltaTime
+      const fps = deltaTime > 0 
+        ? Math.round((frameCountRef.current * 1000) / deltaTime)
+        : 0;
       
       // Calculate average frame time more efficiently
       const frameTime = frameTimesRef.current.length > 0
@@ -144,20 +186,16 @@ const usePerformanceMonitor = (options: PerformanceMonitorOptions) => {
       
       // Get memory usage if available (throttled to reduce overhead)
       let memoryUsage = null;
-      if (window.performance && 'memory' in window.performance) {
-        memoryUsage = (window.performance as any).memory.usedJSHeapSize / (1024 * 1024);
+      const performanceWithMemory = window.performance as PerformanceWithMemory | undefined;
+      if (performanceWithMemory?.memory) {
+        memoryUsage = performanceWithMemory.memory.usedJSHeapSize / (1024 * 1024);
       }
       
-      // Update metrics with function instead of object to prevent closure retention
-      if (isComponentMountedRef.current) {
-        setMetrics(prev => ({
-          ...prev,
-          fps,
-          frameTime,
-          particleCount: quality.particleCount,
-          memoryUsage
-        }));
-      }
+      // Update metrics in ref (no React state to avoid parent re-render)
+      metricsRef.current.fps = fps;
+      metricsRef.current.frameTime = frameTime;
+      metricsRef.current.particleCount = quality.particleCount;
+      metricsRef.current.memoryUsage = memoryUsage;
       
       // Store FPS history for adaptive quality with fixed size
       fpsHistoryRef.current.push(fps);
@@ -257,7 +295,7 @@ const usePerformanceMonitor = (options: PerformanceMonitorOptions) => {
           });
           
           // Update quality level (Low)
-          setMetrics(prev => ({ ...prev, qualityLevel: 1 }));
+          metricsRef.current.qualityLevel = 1;
         } else if (fpsDeficit < -10 && avgFps > targetFps + 15) {
           // Performance is good, increase quality
           setQuality(prev => {
@@ -285,10 +323,10 @@ const usePerformanceMonitor = (options: PerformanceMonitorOptions) => {
           });
           
           // Update quality level (High)
-          setMetrics(prev => ({ ...prev, qualityLevel: 3 }));
+          metricsRef.current.qualityLevel = 3;
         } else {
           // Update quality level (Medium)
-          setMetrics(prev => ({ ...prev, qualityLevel: 2 }));
+          metricsRef.current.qualityLevel = 2;
         }
       }
       
@@ -312,7 +350,8 @@ const usePerformanceMonitor = (options: PerformanceMonitorOptions) => {
   
   // Record frame timing with optimized performance
   const recordFrame = useCallback((frameDuration?: number) => {
-    if (!isComponentMountedRef.current) return;
+    // Don't check mounted state - it causes issues with React StrictMode
+    // The worst case is we count a few extra frames after unmount, which is harmless
     
     frameCountRef.current++;
     
@@ -336,7 +375,7 @@ const usePerformanceMonitor = (options: PerformanceMonitorOptions) => {
           effectsLevel: 0,
           renderScale: 0.75
         });
-        setMetrics(prev => ({ ...prev, qualityLevel: 1 }));
+        metricsRef.current.qualityLevel = 1;
         break;
       case 'medium':
         setQuality({
@@ -344,7 +383,7 @@ const usePerformanceMonitor = (options: PerformanceMonitorOptions) => {
           effectsLevel: 1,
           renderScale: 1.0
         });
-        setMetrics(prev => ({ ...prev, qualityLevel: 2 }));
+        metricsRef.current.qualityLevel = 2;
         break;
       case 'high':
         setQuality({
@@ -352,13 +391,14 @@ const usePerformanceMonitor = (options: PerformanceMonitorOptions) => {
           effectsLevel: 2,
           renderScale: 1.0
         });
-        setMetrics(prev => ({ ...prev, qualityLevel: 3 }));
+        metricsRef.current.qualityLevel = 3;
         break;
     }
   }, [initialParticleCount, minParticleCount, maxParticleCount]);
   
   // Cleanup effect for component unmount
   useEffect(() => {
+    // This effect just handles cleanup, mounted state is set in the first useEffect
     return () => {
       isComponentMountedRef.current = false;
       
@@ -378,7 +418,8 @@ const usePerformanceMonitor = (options: PerformanceMonitorOptions) => {
   }, []);
 
   return {
-    metrics,
+    // Expose a getter so consumers can read latest metrics without causing parent re-renders
+    getMetrics: () => metricsRef.current,
     quality,
     recordFrame,
     setQualityLevel

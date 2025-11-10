@@ -91,7 +91,7 @@ const WebGLDebug: React.FC<WebGLInfoProps> = ({ style }) => {
 
   const debugStyles: React.CSSProperties = {
     position: 'fixed',
-    bottom: '10px',
+    top: '10px',
     right: '10px',
     backgroundColor: 'rgba(0, 0, 0, 0.8)',
     color: '#00ff00',

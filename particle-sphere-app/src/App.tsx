@@ -1,6 +1,10 @@
 import React, { useState, useCallback, memo, Suspense, lazy, useEffect, useRef } from "react";
-import usePerformanceMonitor from "./hooks/usePerformanceMonitor";
+import usePerformanceMonitor, { QualitySettings } from "./hooks/usePerformanceMonitor";
 import WebGLDebug from "./components/WebGLDebug";
+import FPSGraph from "./components/FPSGraph";
+import EnhancedLoading from "./components/EnhancedLoading";
+import ParticleControls, { ParticleSettings } from "./components/ParticleControls";
+import useMobileGestures from "./hooks/useMobileGestures";
 
 // Add TypeScript declaration for gc
 declare global {
@@ -8,26 +12,6 @@ declare global {
     gc?: () => void;
   }
 }
-
-// Lazy load components with preloading
-const visualComponents = {
-  particles: lazy(() => import("./components/ParticleSphere")),
-  neurons: lazy(() => import("./components/Neurons")),
-  simple: lazy(() => import("./components/SimpleSparkles"))
-};
-
-// Preload all components
-const preloadComponents = () => {
-  Object.values(visualComponents).forEach(() => {
-    const preloadComponent = () => {
-      return new Promise(resolve => {
-        // Just importing is enough to preload
-        resolve(true);
-      });
-    };
-    preloadComponent();
-  });
-};
 
 // Component default particle counts - reduced for better performance
 const componentParticleCounts = {
@@ -38,6 +22,33 @@ const componentParticleCounts = {
 
 type VisualizationType = 'particles' | 'neurons' | 'simple';
 type QualityLevel = 'low' | 'medium' | 'high' | 'auto';
+
+type VisualizationComponentProps = {
+  quality?: QualitySettings;
+  onFrameRecord?: (duration?: number) => void;
+  particleSettings?: ParticleSettings;
+};
+
+const visualComponentLoaders = {
+  particles: () => import("./components/ParticleSphere"),
+  neurons: () => import("./components/Neurons"),
+  simple: () => import("./components/SimpleSparkles")
+};
+
+const visualComponents: Record<VisualizationType, React.ComponentType<VisualizationComponentProps>> = {
+  particles: lazy(visualComponentLoaders.particles),
+  neurons: lazy(visualComponentLoaders.neurons),
+  simple: lazy(visualComponentLoaders.simple)
+};
+
+// Lazy load components with preloading
+const preloadComponents = () => {
+  Object.values(visualComponentLoaders).forEach(loader => {
+    loader().catch(error => {
+      console.warn("Failed preloading visualization", error);
+    });
+  });
+};
 
 interface NavButtonProps {
   type: VisualizationType;
@@ -53,12 +64,16 @@ interface QualityButtonProps {
   children: React.ReactNode;
 }
 
-// Loading component
-const LoadingFallback = () => (
-  <div className="loading-screen">
-    <div className="loading-dot"></div>
-  </div>
-);
+// Loading component - now using EnhancedLoading
+const LoadingFallback = ({ vizType }: { vizType?: VisualizationType }) => {
+  const vizNames = {
+    particles: 'Particle Sphere',
+    neurons: 'Neural Network',
+    simple: 'Interactive Sparkles'
+  };
+  
+  return <EnhancedLoading visualizationType={vizType ? vizNames[vizType] : 'Visualization'} />;
+};
 
 // Memoized navigation button component
 const NavButton = memo(({ type, isActive, onClick, children }: NavButtonProps) => {
@@ -96,20 +111,38 @@ const QualityButton = memo(({ level, isActive, onClick, children }: QualityButto
 
 QualityButton.displayName = 'QualityButton';
 
-// Performance stats component
+// Performance stats component with FPS Graph
 const PerformanceStats = memo(({ 
-  fps, 
-  particleCount, 
-  memoryUsage, 
-  gpuTier, 
-  qualityLevel 
+  getMetrics,
+  targetFps 
 }: { 
-  fps: number; 
-  particleCount: number;
-  memoryUsage: number | null;
-  gpuTier: number;
-  qualityLevel: number;
+  getMetrics: () => { fps: number; particleCount: number; memoryUsage: number | null; gpuTier: number; qualityLevel: number };
+  targetFps: number;
 }) => {
+  const [fps, setFps] = useState(0);
+  const [particleCount, setParticleCount] = useState(0);
+  const [memoryUsage, setMemoryUsage] = useState<number | null>(null);
+  const [gpuTier, setGpuTier] = useState(1);
+  const [qualityLevel, setQualityLevel] = useState(2);
+
+  // Poll metrics periodically without causing parent re-renders
+  useEffect(() => {
+    let mounted = true;
+    const interval = window.setInterval(() => {
+      if (!mounted) return;
+      const m = getMetrics();
+      setFps(m.fps);
+      setParticleCount(m.particleCount);
+      setMemoryUsage(m.memoryUsage);
+      setGpuTier(m.gpuTier);
+      setQualityLevel(m.qualityLevel);
+    }, 250); // 4 updates per second for smooth graph without heavy overhead
+
+    return () => {
+      mounted = false;
+      window.clearInterval(interval);
+    };
+  }, [getMetrics]);
   
   const getQualityLabel = (level: number) => {
     switch(level) {
@@ -131,8 +164,13 @@ const PerformanceStats = memo(({
   };
   
   return (
-    <div className="performance-stats">
-      <div><span>FPS:</span> {fps}</div>
+    <div className="performance-stats" style={{ pointerEvents: 'none' }}>
+      {/* FPS Graph */}
+      <div style={{ marginBottom: '15px' }}>
+        <FPSGraph fps={fps} targetFps={targetFps} width={220} height={70} />
+      </div>
+      
+      {/* Stats */}
       <div><span>Particles:</span> {particleCount.toLocaleString()}</div>
       {memoryUsage !== null && <div><span>Memory:</span> {memoryUsage.toFixed(1)} MB</div>}
       <div><span>GPU:</span> {getGpuTierLabel(gpuTier)}</div>
@@ -148,18 +186,21 @@ const VisualizationWrapper = memo(({
   component: Component, 
   isVisible,
   quality,
-  onFrameRecord
+  onFrameRecord,
+  particleSettings
 }: { 
-  component: React.ComponentType<any>; 
+  component: React.ComponentType<VisualizationComponentProps>; 
   isVisible: boolean;
-  quality: any;
+  quality: QualitySettings;
   onFrameRecord: (duration?: number) => void;
+  particleSettings?: ParticleSettings;
 }) => {
-  // Pass quality settings and frame recorder to visualization components
+  // Pass quality settings, particle settings, and frame recorder to visualization components
   return isVisible ? (
     <Component 
       quality={quality} 
-      onFrameRecord={onFrameRecord} 
+      onFrameRecord={onFrameRecord}
+      particleSettings={particleSettings}
     />
   ) : null;
 });
@@ -172,9 +213,23 @@ const App: React.FC = () => {
   const [showStats, setShowStats] = useState(true);
   const [showQualitySelector, setShowQualitySelector] = useState(false);
   const [qualityPreset, setQualityPreset] = useState<QualityLevel>('auto');
+  const [showParticleControls, setShowParticleControls] = useState(false);
+  const [showDebug, setShowDebug] = useState(true);
+  
+  // Particle settings state
+  const [particleSettings, setParticleSettings] = useState<ParticleSettings>({
+    particleCount: componentParticleCounts[activeViz],
+    particleSize: 2,
+    speed: 1,
+    glowIntensity: 1,
+    rotationSpeed: 1
+  });
   
   // Start time for measuring frame duration
   const frameStartTimeRef = useRef<number>(0);
+  
+  // Container ref for mobile gestures
+  const containerRef = useRef<HTMLDivElement>(null);
   
   // Initialize performance monitor with current visualization's particle count
   const performance = usePerformanceMonitor({
@@ -207,6 +262,14 @@ const App: React.FC = () => {
     preloadComponents();
   }, []);
   
+  // Update particle count when visualization changes
+  useEffect(() => {
+    setParticleSettings(prev => ({
+      ...prev,
+      particleCount: componentParticleCounts[activeViz]
+    }));
+  }, [activeViz]);
+  
   // Toggle performance stats display
   const toggleStats = useCallback(() => {
     setShowStats(prev => !prev);
@@ -215,6 +278,21 @@ const App: React.FC = () => {
   // Toggle quality selector
   const toggleQualitySelector = useCallback(() => {
     setShowQualitySelector(prev => !prev);
+  }, []);
+  
+  // Toggle particle controls
+  const toggleParticleControls = useCallback(() => {
+    setShowParticleControls(prev => !prev);
+  }, []);
+  
+  // Toggle debug panel
+  const toggleDebug = useCallback(() => {
+    setShowDebug(prev => !prev);
+  }, []);
+  
+  // Handle particle settings change
+  const handleParticleSettingsChange = useCallback((settings: ParticleSettings) => {
+    setParticleSettings(settings);
   }, []);
   
   // Handle quality level change
@@ -236,7 +314,7 @@ const App: React.FC = () => {
       if (window.gc) {
         try {
           window.gc();
-        } catch (e) {
+        } catch {
           console.log('GC not available');
         }
       }
@@ -251,15 +329,35 @@ const App: React.FC = () => {
       }, 300);
     }
   }, [activeViz]);
+  
+  // Mobile gesture handlers
+  const handleSwipeLeft = useCallback(() => {
+    const vizOrder: VisualizationType[] = ['particles', 'neurons', 'simple'];
+    const currentIndex = vizOrder.indexOf(activeViz);
+    const nextIndex = (currentIndex + 1) % vizOrder.length;
+    handleVisualizationChange(vizOrder[nextIndex]);
+  }, [activeViz, handleVisualizationChange]);
+  
+  const handleSwipeRight = useCallback(() => {
+    const vizOrder: VisualizationType[] = ['particles', 'neurons', 'simple'];
+    const currentIndex = vizOrder.indexOf(activeViz);
+    const prevIndex = (currentIndex - 1 + vizOrder.length) % vizOrder.length;
+    handleVisualizationChange(vizOrder[prevIndex]);
+  }, [activeViz, handleVisualizationChange]);
+  
+  const handleDoubleTap = useCallback(() => {
+    setShowStats(prev => !prev);
+  }, []);
+  
+  // Setup mobile gestures
+  useMobileGestures(containerRef, {
+    onSwipeLeft: handleSwipeLeft,
+    onSwipeRight: handleSwipeRight,
+    onDoubleTap: handleDoubleTap
+  });
 
   // Get current component
   const CurrentVisualization = visualComponents[activeViz];
-
-  const [showDebug, setShowDebug] = useState(true);
-  
-  const toggleDebug = useCallback(() => {
-    setShowDebug(prev => !prev);
-  }, []);
 
   return (
     <>
@@ -484,7 +582,7 @@ const App: React.FC = () => {
           }
         `}
       </style>
-      <div style={{ height: "100vh", backgroundColor: "#000" }}>
+      <div ref={containerRef} style={{ height: "100vh", backgroundColor: "#000" }}>
         <div className="nav-container">
           <NavButton
             type="particles"
@@ -542,13 +640,20 @@ const App: React.FC = () => {
         
         {showStats && (
           <PerformanceStats 
-            fps={performance.metrics.fps}
-            particleCount={performance.metrics.particleCount}
-            memoryUsage={performance.metrics.memoryUsage}
-            gpuTier={performance.metrics.gpuTier}
-            qualityLevel={performance.metrics.qualityLevel}
+            getMetrics={performance.getMetrics}
+            targetFps={30}
           />
         )}
+        
+        {/* Particle Controls Panel */}
+        <ParticleControls
+          settings={particleSettings}
+          onChange={handleParticleSettingsChange}
+          isVisible={showParticleControls}
+          onClose={() => setShowParticleControls(false)}
+          minParticles={componentParticleCounts[activeViz] * 0.2}
+          maxParticles={componentParticleCounts[activeViz] * 1.5}
+        />
         
         <div className="utility-buttons">
           <button 
@@ -567,6 +672,13 @@ const App: React.FC = () => {
           </button>
           <button 
             className="utility-button" 
+            onClick={toggleParticleControls} 
+            title="Particle Controls"
+          >
+            🎛️
+          </button>
+          <button 
+            className="utility-button" 
             onClick={toggleDebug} 
             title="WebGL Debug"
           >
@@ -577,12 +689,13 @@ const App: React.FC = () => {
         {showDebug && <WebGLDebug />}
         
         <div className={`visualization-container ${isTransitioning ? 'transitioning' : ''}`}>
-          <Suspense fallback={<LoadingFallback />}>
+          <Suspense fallback={<LoadingFallback vizType={activeViz} />}>
             <VisualizationWrapper
               component={CurrentVisualization}
               isVisible={!isTransitioning}
               quality={performance.quality}
               onFrameRecord={handleFrameRecord}
+              particleSettings={particleSettings}
             />
           </Suspense>
         </div>
